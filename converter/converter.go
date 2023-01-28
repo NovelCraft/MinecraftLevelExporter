@@ -12,10 +12,16 @@ import (
 // Section represents a section of a Minecraft world. It contains the x, y, z
 // coordinates of the section and a 3D array of blocks.
 type Section struct {
-	X      int       `json:"x"`
-	Y      int       `json:"y"`
-	Z      int       `json:"z"`
-	Blocks [][][]int `json:"blocks"`
+	X      int   `json:"x"`
+	Y      int   `json:"y"`
+	Z      int   `json:"z"`
+	Blocks []int `json:"blocks"`
+}
+
+type Size struct {
+	X int
+	Y int
+	Z int
 }
 
 // inputJsonSchema is the json schema for the input json file. It must be a 3D
@@ -23,35 +29,95 @@ type Section struct {
 const inputJsonSchema string = `
 {
 	"$schema": "http://json-schema.org/draft-07/schema#",
-	"type": "array",
-	"items": {
-		"type": "array",
-		"items": {
+	"type": "object",
+	"properties": {
+		"size": {
 			"type": "array",
 			"items": {
-				"type": "integer"
-			}
+				"type": "integer",
+				"minimum": 1
+			},
+			"minItems": 3,
+			"maxItems": 3
+		},
+		"structure": {
+			"type": "object",
+			"properties": {
+				"block_indices": {
+					"type": "array",
+					"items": {
+						"type": "array",
+						"items": {
+							"type": "integer"
+						},
+						"minItems": 1
+					},
+					"minItems": 1
+				},
+				"palette": {
+					"type": "object",
+					"properties": {
+						"default": {
+							"type": "object",
+							"properties": {
+								"block_palette": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"name": {
+												"type": "string"
+											}
+										},
+										"required": ["name"]
+									},
+									"minItems": 1
+								}
+							},
+							"required": ["block_palette"]
+						}
+					},
+					"required": ["default"]
+				}
+			},
+			"required": ["block_indices", "palette"]
+		}
+	},
+	"required": ["size", "structure"]
+}
+`
+
+const blockDictJsonSchema string = `
+{
+	"$schema": "http://json-schema.org/draft-07/schema#",
+	"type": "object",
+	"patternProperties": {
+		"^minecraft:\\w+$": {
+			"type": "integer"
 		}
 	}
 }
 `
 
+const DefaultBlockId = 0
+const OutOfRangeBlockId = -1
+
 func main() {
 	// Validate arguments.
-	if len(os.Args) < 2 {
-		logger.Error("no input file specified")
-		logger.Info("Usage: %s <input file>", os.Args[0])
+	if len(os.Args) < 3 {
+		logger.Error("no input file or dictionary specified")
+		logger.Info("Usage: %s <input file> <dictionary>", os.Args[0])
 		return
 	}
 
-	if len(os.Args) > 2 {
+	if len(os.Args) > 3 {
 		logger.Error("too many arguments")
-		logger.Info("Usage: %s <input file>", os.Args[0])
+		logger.Info("Usage: %s <input file> <dictionary>", os.Args[0])
 		return
 	}
 
-	if !strings.HasSuffix(os.Args[1], ".json") {
-		logger.Error("input file must be a json file")
+	if !strings.HasSuffix(os.Args[1], ".json") || !strings.HasSuffix(os.Args[2], ".json") {
+		logger.Error("input file and dictionary file must be JSON files")
 		return
 	}
 
@@ -77,25 +143,52 @@ func main() {
 		return
 	}
 
-	// Read input JSON to a 3D array.
-	var inputArray [][][]int
-	err = json.Unmarshal(jsonContent, &inputArray)
+	// Read input JSON to a map.
+	var inputMap map[string]interface{}
+	err = json.Unmarshal(jsonContent, &inputMap)
 	if err != nil {
 		logger.Error("failed to parse input file: %s", err.Error())
 		return
 	}
 
-	// Validate the input array.
-	if !validateArray(inputArray) {
-		logger.Error("input array is not valid")
+	// Read block dictionary.
+	jsonContent, err = os.ReadFile(os.Args[2])
+	if err != nil {
+		logger.Error("failed to read block dictionary: %s", err.Error())
 		return
 	}
 
-	// Pad the input array to be a multiple of 16.
-	inputArray = padArray(inputArray, -1)
+	// Validate block dictionary.
+	schemaLoader = gojsonschema.NewStringLoader(blockDictJsonSchema)
+	documentLoader = gojsonschema.NewBytesLoader((jsonContent))
 
-	// Convert the input array to an array of sections.
-	sections := convertToSections(inputArray)
+	result, err = gojsonschema.Validate(schemaLoader, documentLoader)
+	if err != nil {
+		logger.Error("failed to validate block dictionary: %s", err.Error())
+		return
+	}
+
+	if !result.Valid() {
+		logger.Error("block dictionary is not valid")
+		return
+	}
+
+	// Read block dictionary to a map.
+	var blockDict map[string]int
+	err = json.Unmarshal(jsonContent, &blockDict)
+	if err != nil {
+		logger.Error("failed to parse block dictionary: %s", err.Error())
+		return
+	}
+
+	// Validate the input map.
+	if !validateInput(inputMap) {
+		logger.Error("input map is not valid")
+		return
+	}
+
+	// Convert the input map to an array of sections.
+	sections := convertToSections(inputMap, blockDict, DefaultBlockId, OutOfRangeBlockId)
 
 	// Make the level data map
 	levelData := make(map[string]interface{})
@@ -122,88 +215,98 @@ func main() {
 	logger.Info("Successfully converted input file to level data")
 }
 
-// validateArray checks if the input array is a 3D cubic array of integers.
-func validateArray(inputArray [][][]int) bool {
-	for i := 0; i < len(inputArray)-1; i++ {
-		if len(inputArray[i]) != len(inputArray[i+1]) {
-			return false
-		}
+// validateInput checks if the input map is a 3D cubic array of integers.
+func validateInput(inputMap map[string]interface{}) bool {
+	expectedBlockCount := int(inputMap["size"].([]interface{})[0].(float64) * inputMap["size"].([]interface{})[1].(float64) *
+		inputMap["size"].([]interface{})[2].(float64))
+
+	blocks := inputMap["structure"].(map[string]interface{})["block_indices"].([]interface{})[0].([]interface{})
+
+	blockCount := len(blocks)
+
+	// Check if the number of blocks is correct.
+	if blockCount != expectedBlockCount {
+		return false
 	}
 
-	for _, yArray := range inputArray {
-		for i := 0; i < len(yArray)-1; i++ {
-			if len(yArray[i]) != len(yArray[i+1]) {
-				return false
-			}
+	// Get the number of different block types.
+	var expectedBlockTypeCount int = 0
+	for _, e := range blocks {
+		num := int(e.(float64))
+		if num > expectedBlockTypeCount {
+			expectedBlockTypeCount = num
 		}
 	}
+	expectedBlockTypeCount++ // Add 1 because the block count starts at 0.
 
-	return true
+	blockTypes := inputMap["structure"].(map[string]interface{})["palette"].(map[string]interface{})["default"].(map[string]interface{})["block_palette"].([]interface{})
+	blockTypeCount := len(blockTypes)
+
+	// Check if the number of block types is correct.
+	if blockTypeCount != expectedBlockTypeCount {
+		return false
+	} else {
+		return true
+	}
 }
 
-// padArray pads the input array to be a multiple of 16.
-func padArray(inputArray [][][]int, paddingValue int) [][][]int {
-	// Calculate size of each dimension after padding.
-	xSize := (len(inputArray) + 15) / 16 * 16
-	ySize := (len(inputArray[0]) + 15) / 16 * 16
-	zSize := (len(inputArray[0][0]) + 15) / 16 * 16
-
-	// Create the padded array.
-	paddedArray := make([][][]int, xSize)
-	for i := range paddedArray {
-		paddedArray[i] = make([][]int, ySize)
-		for j := range paddedArray[i] {
-			paddedArray[i][j] = make([]int, zSize)
-			// Fill the padded array with the padding value.
-			for k := range paddedArray[i][j] {
-				paddedArray[i][j][k] = paddingValue
-			}
-		}
+// convertToSections converts the input map to an array of sections.
+func convertToSections(inputMap map[string]interface{}, blockDict map[string]int, defaultBlockId int, outOfRangeBlockId int) []Section {
+	size := Size{
+		X: int(inputMap["size"].([]interface{})[0].(float64)),
+		Y: int(inputMap["size"].([]interface{})[1].(float64)),
+		Z: int(inputMap["size"].([]interface{})[2].(float64)),
 	}
 
-	// Copy the input array to the padded array.
-	for i := 0; i < len(inputArray); i++ {
-		for j := 0; j < len(inputArray[i]); j++ {
-			copy(paddedArray[i][j], inputArray[i][j])
-		}
+	rawBlocks := inputMap["structure"].(map[string]interface{})["block_indices"].([]interface{})[0].([]interface{})
+
+	blockIndiceDict := make([]string, 0)
+	blockTypes := inputMap["structure"].(map[string]interface{})["palette"].(map[string]interface{})["default"].(map[string]interface{})["block_palette"].([]interface{})
+	for _, blockType := range blockTypes {
+		blockIndiceDict = append(blockIndiceDict, blockType.(map[string]interface{})["name"].(string))
 	}
 
-	return paddedArray
-}
-
-// convertToSections converts the input array to an array of sections.
-func convertToSections(inputArray [][][]int) []Section {
-	// Calculate the number of sections needed.
-	xSections := len(inputArray) / 16
-	ySections := len(inputArray[0]) / 16
-	zSections := len(inputArray[0][0]) / 16
+	blocks := make([]int, len(rawBlocks))
+	// Transform the block indices to block ids.
+	for i, blockIndice := range rawBlocks {
+		blockName := blockIndiceDict[int(blockIndice.(float64))]
+		blockId, ok := blockDict[blockName]
+		if !ok {
+			blockId = defaultBlockId
+		}
+		blocks[i] = blockId
+	}
 
 	// Create the sections.
-	sections := make([]Section, xSections*ySections*zSections)
+	sectionCount := Size{
+		X: (size.X + 15) / 16,
+		Y: (size.Y + 15) / 16,
+		Z: (size.Z + 15) / 16,
+	}
 
-	// Fill the sections.
-	for i := 0; i < xSections; i++ {
-		for k := 0; k < zSections; k++ {
-			logger.Info("Reading chunk at (%d, *, %d)", i*16, k*16)
-			for j := 0; j < ySections; j++ {
-				logger.Info("Creating section at (%d, %d, %d)", i*16, j*16, k*16)
+	sections := make([]Section, 0)
+	for x := 0; x < sectionCount.X; x++ {
+		for y := 0; y < sectionCount.Y; y++ {
+			for z := 0; z < sectionCount.Z; z++ {
+				offset := x*16*size.X*size.Y + y*16*size.X + z*16
 
-				// Create the blocks array and fill it with the input array.
-				blocks := make([][][]int, 16)
-				for l := range blocks {
-					blocks[l] = make([][]int, 16)
-					for m := range blocks[l] {
-						blocks[l][m] = make([]int, 16)
-						copy(blocks[l][m], inputArray[i*16+l][j*16+m][k*16:(k+1)*16])
+				sectionBlocks := make([]int, 4096)
+				for i := 0; i < 4096; i++ {
+					if i+offset >= len(blocks) {
+						sectionBlocks[i] = outOfRangeBlockId
+					} else {
+						sectionBlocks[i] = blocks[i+offset]
 					}
 				}
 
-				sections[i*ySections*zSections+j*zSections+k] = Section{
-					X:      i * 16,
-					Y:      j * 16,
-					Z:      k * 16,
-					Blocks: blocks,
+				section := Section{
+					X:      x * 16,
+					Y:      y * 16,
+					Z:      z * 16,
+					Blocks: sectionBlocks,
 				}
+
+				sections = append(sections, section)
 			}
 		}
 	}
