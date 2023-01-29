@@ -1,7 +1,11 @@
 package main
 
 import (
+	"archive/zip"
+	"compress/flate"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -99,25 +103,30 @@ const blockDictJsonSchema string = `
 }
 `
 
-const DefaultBlockId = 0
-const OutOfRangeBlockId = -1
+const DefaultBlockId int = 0
+const OutOfRangeBlockId int = -1
 
 func main() {
 	// Validate arguments.
-	if len(os.Args) < 3 {
-		logger.Error("no input file or dictionary specified")
-		logger.Info("Usage: %s <input file> <dictionary>", os.Args[0])
+	if len(os.Args) < 4 {
+		logger.Error("too few arguments")
+		logger.Info("Usage: %s <input file> <dictionary> <output file>", os.Args[0])
 		return
 	}
 
-	if len(os.Args) > 3 {
+	if len(os.Args) > 4 {
 		logger.Error("too many arguments")
-		logger.Info("Usage: %s <input file> <dictionary>", os.Args[0])
+		logger.Info("Usage: %s <input file> <dictionary> <output file>", os.Args[0])
 		return
 	}
 
 	if !strings.HasSuffix(os.Args[1], ".json") || !strings.HasSuffix(os.Args[2], ".json") {
 		logger.Error("input file and dictionary file must be JSON files")
+		return
+	}
+
+	if !strings.HasSuffix(os.Args[3], ".dat") {
+		logger.Error("output file must be a .dat file")
 		return
 	}
 
@@ -204,9 +213,8 @@ func main() {
 		return
 	}
 
-	// Write the level data json to a file.
-	fileName := strings.TrimSuffix(os.Args[1], ".json") + ".level.json"
-	err = os.WriteFile(fileName, levelDataJson, 0644)
+	// Write the level data to a file.
+	err = writeLevelDataFile(levelDataJson, os.Args[3])
 	if err != nil {
 		logger.Error("failed to write level data to file: %s", err.Error())
 		return
@@ -312,4 +320,39 @@ func convertToSections(inputMap map[string]interface{}, blockDict map[string]int
 	}
 
 	return sections
+}
+
+func writeLevelDataFile(levelDataJson []byte, filePath string) error {
+	// Remove level.dat if it exists.
+	err := os.Remove(filePath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove %s: %s", filePath, err.Error())
+	}
+
+	// Create level.dat.
+	zipFile, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to create %s: %s", filePath, err.Error())
+	}
+
+	// Write the level data to level.dat.
+	zipWriter := zip.NewWriter(zipFile)
+	defer zipWriter.Close()
+
+	// Set compression level to best.
+	zipWriter.RegisterCompressor(zip.Deflate, func(out io.Writer) (io.WriteCloser, error) {
+		return flate.NewWriter(out, flate.BestCompression)
+	})
+
+	levelDataWriter, err := zipWriter.Create("level_data.json")
+	if err != nil {
+		return fmt.Errorf("failed to create level_data.json in %s: %s", filePath, err.Error())
+	}
+
+	_, err = levelDataWriter.Write(levelDataJson)
+	if err != nil {
+		return fmt.Errorf("failed to write level_data.json to %s: %s", filePath, err.Error())
+	}
+
+	return nil
 }
