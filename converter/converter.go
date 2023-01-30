@@ -260,7 +260,7 @@ func validateInput(inputMap map[string]interface{}) bool {
 
 // convertToSections converts the input map to an array of sections.
 func convertToSections(inputMap map[string]interface{}, blockDict map[string]int, defaultBlockId int, outOfRangeBlockId int) []Section {
-	size := Size{
+	exportedSize := Size{
 		X: int(inputMap["size"].([]interface{})[0].(float64)),
 		Y: int(inputMap["size"].([]interface{})[1].(float64)),
 		Z: int(inputMap["size"].([]interface{})[2].(float64)),
@@ -274,8 +274,8 @@ func convertToSections(inputMap map[string]interface{}, blockDict map[string]int
 		blockIndiceDict = append(blockIndiceDict, blockType.(map[string]interface{})["name"].(string))
 	}
 
-	blocks := make([]int, len(rawBlocks))
 	// Transform the block indices to block ids.
+	blocks := make([]int, len(rawBlocks))
 	for i, blockIndice := range rawBlocks {
 		blockName := blockIndiceDict[int(blockIndice.(float64))]
 		blockId, ok := blockDict[blockName]
@@ -287,23 +287,26 @@ func convertToSections(inputMap map[string]interface{}, blockDict map[string]int
 
 	// Create the sections.
 	sectionCount := Size{
-		X: (size.X + 15) / 16,
-		Y: (size.Y + 15) / 16,
-		Z: (size.Z + 15) / 16,
+		X: (exportedSize.X + 15) / 16,
+		Y: (exportedSize.Y + 15) / 16,
+		Z: (exportedSize.Z + 15) / 16,
 	}
 
 	sections := make([]Section, 0)
 	for x := 0; x < sectionCount.X; x++ {
 		for y := 0; y < sectionCount.Y; y++ {
 			for z := 0; z < sectionCount.Z; z++ {
-				offset := x*16*size.X*size.Y + y*16*size.X + z*16
-
 				sectionBlocks := make([]int, 4096)
-				for i := 0; i < 4096; i++ {
-					if i+offset >= len(blocks) {
-						sectionBlocks[i] = outOfRangeBlockId
-					} else {
-						sectionBlocks[i] = blocks[i+offset]
+
+				for i := 0; i < 16; i++ {
+					for j := 0; j < 16; j++ {
+						for k := 0; k < 16; k++ {
+							if x*16+i >= exportedSize.X || y*16+j >= exportedSize.Y || z*16+k >= exportedSize.Z {
+								sectionBlocks[i*256+j*16+k] = outOfRangeBlockId
+							} else {
+								sectionBlocks[i*256+j*16+k] = blocks[getOffset(x*16+i, y*16+j, z*16+k, exportedSize)]
+							}
+						}
 					}
 				}
 
@@ -355,4 +358,8 @@ func writeLevelDataFile(levelDataJson []byte, filePath string) error {
 	}
 
 	return nil
+}
+
+func getOffset(x int, y int, z int, size Size) int {
+	return x*size.Y*size.Z + y*size.Z + z
 }
