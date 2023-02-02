@@ -125,8 +125,8 @@ func main() {
 		return
 	}
 
-	if !strings.HasSuffix(os.Args[3], ".dat") {
-		logger.Error("output file must be a .dat file")
+	if !strings.HasSuffix(os.Args[3], ".nclevel") {
+		logger.Error("output file must be a .nclevel file")
 		return
 	}
 
@@ -332,27 +332,40 @@ func writeLevelDataFile(levelDataJson []byte, filePath string) error {
 		return fmt.Errorf("failed to remove %s: %s", filePath, err.Error())
 	}
 
-	// Create level.dat.
+	// Create export target file.
 	zipFile, err := os.Create(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to create %s: %s", filePath, err.Error())
 	}
+	defer zipFile.Close()
 
-	// Write the level data to level.dat.
 	zipWriter := zip.NewWriter(zipFile)
 	defer zipWriter.Close()
 
-	// Set compression level to best.
 	zipWriter.RegisterCompressor(zip.Deflate, func(out io.Writer) (io.WriteCloser, error) {
 		return flate.NewWriter(out, flate.BestCompression)
 	})
 
-	levelDataWriter, err := zipWriter.Create("level_data.json")
+	// Create level.dat in the zip file.
+	levelDatWriter, err := zipWriter.Create("level.dat")
+	if err != nil {
+		return fmt.Errorf("failed to create level.dat in %s: %s", filePath, err.Error())
+	}
+
+	levelDatZipWriter := zip.NewWriter(levelDatWriter)
+	defer levelDatZipWriter.Close()
+
+	levelDatZipWriter.RegisterCompressor(zip.Deflate, func(out io.Writer) (io.WriteCloser, error) {
+		return flate.NewWriter(out, flate.BestCompression)
+	})
+
+	// Create level_data.json in level.dat.
+	levelDataJsonWriter, err := levelDatZipWriter.Create("level_data.json")
 	if err != nil {
 		return fmt.Errorf("failed to create level_data.json in %s: %s", filePath, err.Error())
 	}
 
-	_, err = levelDataWriter.Write(levelDataJson)
+	_, err = levelDataJsonWriter.Write(levelDataJson)
 	if err != nil {
 		return fmt.Errorf("failed to write level_data.json to %s: %s", filePath, err.Error())
 	}
